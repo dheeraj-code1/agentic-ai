@@ -107,6 +107,16 @@ allowance_filter = Filter(
     ]
 )
 
+
+leave_filter = Filter(
+    must=[
+        FieldCondition(
+            key="category",
+            match=MatchValue(value="leave"),
+        )
+    ]
+)
+
 def ask_llm(question:str, context:str,client:Groq,model:str="openai/gpt-oss-20b"):
     system_prompt = f""" You are a helpful assistant that can answer questions about the following documents: {context} """
 
@@ -133,8 +143,8 @@ def ask_llm(question:str, context:str,client:Groq,model:str="openai/gpt-oss-20b"
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-question = "how many types of allowance employee have?"
-context = search_with_filter(question, allowance_filter)
+question = "I am plannig vaction how many leaves i can take?"
+context = search_with_filter(question, leave_filter)
 
 context = "\n".join([doc.payload["text"] for doc in context])
 

@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from html import unescape
+from dotenv import load_dotenv
 # from naukri_credentials import EMAIL, PASSWORD
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -28,8 +29,10 @@ from selenium.common.exceptions import (
 from webdriver_manager.chrome import ChromeDriverManager
 HEADLESS_MODE = False
 
-EMAIL = "dheeraj25062003@gmail.com"
-PASSWORD = "***REMOVED***"
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+EMAIL = os.environ["NAUKRI_EMAIL"]
+PASSWORD = os.environ["NAUKRI_PASSWORD"]
 COOKIE_FILE = "naukri_cookies.json"
 
 MAX_JOBS_TO_APPLY = 10

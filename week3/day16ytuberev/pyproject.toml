@@ -1,0 +1,15 @@
+[project]
+name = "day16ytuberev"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "groq>=1.7.0",
+    "python-dotenv>=1.2.4",
+    "qdrant-client>=1.19.1",
+    "sentence-transformers>=6.1.0",
+    "youtube-transcript-api>=1.2.4",
+    "yt-dlp>=2026.8.19",
+]

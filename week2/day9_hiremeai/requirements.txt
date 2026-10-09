@@ -1,0 +1,9 @@
+fastapi>=0.141.1
+uvicorn>=0.53.0
+groq>=1.7.0
+pydantic>=2.13.5
+python-dotenv>=1.2.3
+pymupdf>=1.28.2
+python-docx>=1.2.0
+selenium>=4.50.0
+webdriver-manager>=4.1.2

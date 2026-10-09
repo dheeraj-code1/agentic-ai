@@ -4,7 +4,7 @@ Naukri auto-apply bot. A Selenium bot searches jobs, scores each JD against your
 
 - `backend/` – FastAPI app (Groq LLM): `/score` (resume vs JD match) and `/chat_naukari` (answers screening questions)
 - `bot/` – Selenium bot that logs in to Naukri and applies
-- `utils/mailer.py` – Gmail SMTP helper
+- `utils/mailer.py` – Gmail SMTP helper that emails a summary after each bot run
 
 ## Requirements
 
@@ -47,7 +47,8 @@ cp bot/.env.sample bot/.env
 | File | Variable | Value |
 |---|---|---|
 | `backend/.env` | `GROQ_API_KEY` | Your Groq API key |
-| `backend/.env` | `GMAIL_SENDER`, `GMAIL_APP_PASSWORD` | Optional, for `utils/mailer.py` ([Gmail App Password](https://myaccount.google.com/apppasswords)) |
+| `backend/.env` | `GMAIL_SENDER`, `GMAIL_APP_PASSWORD` | Optional, for the report email ([Gmail App Password](https://myaccount.google.com/apppasswords)) |
+| `backend/.env` | `REPORT_EMAIL_TO` | Optional, who receives the report (defaults to `GMAIL_SENDER`; comma-separate for several) |
 | `bot/.env` | `NAUKRI_EMAIL`, `NAUKRI_PASSWORD` | Your Naukri login (keep the password in quotes) |
 | `bot/.env` | `CHAT_API_URL`, `SCORE_API_URL` | Optional, only if the backend is not on `127.0.0.1:8000` |
 
@@ -89,17 +90,36 @@ Edit the constants at the top of `bot/main.py`:
 | `EXCLUDED_COMPANIES` | Companies to skip (empty list = none) |
 | `LOCATION_FILTER_ENABLED`, `LOCATIONS` | Location filter on/off and which cities |
 | `HEADLESS_MODE` | Run Chrome without a window |
+| `SEND_REPORT_EMAIL` | Email a run summary when the bot finishes |
 
-Jobs that pass the score but only offer "Apply on company site" are saved to `bot/company_site_jobs.csv`.
+## Output files
 
-## Test the score API
+Both CSVs have the same columns (`saved_at, title, company, score, verdict, reason, url`) and each job URL is saved once:
 
-With the backend running, `test.py` sends the JD in `test.txt` to `/score`:
+- `bot/applied_jobs.csv` – jobs the bot applied to
+- `bot/company_site_jobs.csv` – jobs that passed the score but only offer "Apply on company site", to apply manually
+
+## Report email
+
+When `SEND_REPORT_EMAIL = True` and Gmail is set up in `backend/.env`, the bot emails a summary at the end of every run (also if it crashes mid-run): counts per result, a table of applied jobs, a table of company-site jobs, and both CSVs attached.
+
+Gmail needs an App Password (2-Step Verification must be on); your normal Google password will not work.
+
+## Tests
+
+With the backend running, send the JD in `test.txt` to `/score`:
 
 ```bash
 uv run python test.py
 ```
 
+Send a sample report email built from `bot/company_site_jobs.csv`:
+
+```bash
+uv run python test.py email
+```
+
 ## Notes
 
 - Groq's free tier allows about 200k tokens/day for `openai/gpt-oss-20b`. Each `/score` call uses about 2k tokens; when the limit is hit, the API returns errors until it resets.
+- `535 Username and Password not accepted` or `Connection unexpectedly closed` from Gmail means the App Password is wrong or revoked – create a new one.

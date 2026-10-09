@@ -1,6 +1,7 @@
 import re
 import time
 import os
+import sys
 import csv
 import json
 from datetime import datetime
@@ -27,6 +28,9 @@ from selenium.common.exceptions import (
     NoSuchElementException,
 )
 from webdriver_manager.chrome import ChromeDriverManager
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.mailer import send_job_report
 HEADLESS_MODE = False
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -36,7 +40,7 @@ PASSWORD = os.environ["NAUKRI_PASSWORD"]
 COOKIE_FILE = "naukri_cookies.json"
 
 MAX_JOBS_TO_APPLY = 10
-MAX_JOBS_TO_CHECK = 100   # total jobs to open across all pages, applied or skipped
+MAX_JOBS_TO_CHECK = 15   # total jobs to open across all pages, applied or skipped
 MAX_SCROLLS_TO_LOAD_JOBS = 10
 MAX_PAGES = 3       # how many result pages to walk through before giving up
 SEARCH_KEYWORD = "data engineer"
@@ -53,6 +57,8 @@ MIN_MATCH_SCORE = 55 # Minimum score to apply to a job
 
 EXCLUDED_COMPANIES = ['infosys','mfilterit'] # Companies to skip. Matched case-insensitively as a substring, so "infosys" also skips "Infosys Limited". Leave empty to process all.
 COMPANY_SITE_JOBS_FILE = "company_site_jobs.csv" # Jobs that pass the score check but only offer "Apply on company site".
+APPLIED_JOBS_FILE = "applied_jobs.csv" # Jobs the bot applied to, same columns as COMPANY_SITE_JOBS_FILE.
+SEND_REPORT_EMAIL = True # Email a run summary with both CSVs attached when the bot finishes.
 LOCATION_FILTER_ENABLED = False # True: tick the LOCATIONS below in the sidebar. False: search all locations.
 
 LOCATIONS = {
@@ -1442,39 +1448,55 @@ def should_apply_by_score(driver, title):
     return False, result
 
 
-def save_company_site_job(title, company, href, score_result):
-    """Append a matched company-site job to COMPANY_SITE_JOBS_FILE, once per URL."""
-    path = Path(COMPANY_SITE_JOBS_FILE)
+JOB_CSV_FIELDS = ["saved_at", "title", "company", "score", "verdict", "reason", "url"]
+
+
+def save_job_row(csv_file, title, company, href, score_result):
+    """Append a job to csv_file, once per URL. Returns the job row either way."""
+    score_result = score_result or {}
+    row = {
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "title": title,
+        "company": company,
+        "score": score_result.get("score", ""),
+        "verdict": score_result.get("verdict", ""),
+        "reason": score_result.get("reason", ""),
+        "url": href,
+    }
+
+    path = Path(csv_file)
     is_new_file = not path.exists()
     if not is_new_file:
         with path.open(newline="", encoding="utf-8") as f:
-            if any(row.get("url") == href for row in csv.DictReader(f)):
-                print(f"  Company-site job already saved in {path}")
-                return
+            if any(saved.get("url") == href for saved in csv.DictReader(f)):
+                print(f"  Job already saved in {path}")
+                return row
 
-    score_result = score_result or {}
     with path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["saved_at", "title", "company", "score", "verdict", "reason", "url"]
-        )
+        writer = csv.DictWriter(f, fieldnames=JOB_CSV_FIELDS)
         if is_new_file:
             writer.writeheader()
-        writer.writerow({
-            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "title": title,
-            "company": company,
-            "score": score_result.get("score", ""),
-            "verdict": score_result.get("verdict", ""),
-            "reason": score_result.get("reason", ""),
-            "url": href,
-        })
-    print(f"  Saved company-site job to {path}")
+        writer.writerow(row)
+    print(f"  Saved job to {path}")
+    return row
+
+
+def save_company_site_job(run, title, company, href, score_result):
+    run["company_site_jobs"].append(
+        save_job_row(COMPANY_SITE_JOBS_FILE, title, company, href, score_result)
+    )
+
+
+def save_applied_job(run, title, company, href, score_result):
+    run["applied_jobs"].append(
+        save_job_row(APPLIED_JOBS_FILE, title, company, href, score_result)
+    )
 
 
 # =========================================================
 # Apply to a single job
 # =========================================================
-def apply_to_single_job(driver, title, href, wait_timeout=20):
+def apply_to_single_job(driver, run, title, href, wait_timeout=20):
     """
     Returns one of: "applied", "skipped_company_site", "skipped_questions",
     "skipped_low_score", "skipped_excluded_company", "failed". Jobs with screening questions are filled
@@ -1511,7 +1533,7 @@ def apply_to_single_job(driver, title, href, wait_timeout=20):
             reason = classify_missing_apply_button(driver)
             if reason == "skipped_company_site":
                 print("  Skipping: Apply redirects to company site")
-                save_company_site_job(title, company, href, score_result)
+                save_company_site_job(run, title, company, href, score_result)
             elif reason == "skipped_already_applied":
                 print("  Skipping: already applied to this job")
             else:
@@ -1523,7 +1545,7 @@ def apply_to_single_job(driver, title, href, wait_timeout=20):
 
         if is_company_site_apply(apply_buttons):
             print("  Skipping: Apply redirects to company site")
-            save_company_site_job(title, company, href, score_result)
+            save_company_site_job(run, title, company, href, score_result)
             return "skipped_company_site"
 
         clicked = False
@@ -1555,6 +1577,7 @@ def apply_to_single_job(driver, title, href, wait_timeout=20):
             print("  Screening questions detected — filling via API")
             if fill_screening_form(driver):
                 print("  Applied (form filled):", title)
+                save_applied_job(run, title, company, href, score_result)
                 print("  Waiting 3 seconds after apply")
                 time.sleep(3)
                 return "applied"
@@ -1563,6 +1586,7 @@ def apply_to_single_job(driver, title, href, wait_timeout=20):
             return "failed"
 
         print("  Applied:", title)
+        save_applied_job(run, title, company, href, score_result)
         print("  Waiting 3 seconds after apply")
         time.sleep(3)
         return "applied"
@@ -1600,56 +1624,85 @@ def apply_jobs(driver):
         "failed": 0,
     }
 
-    attempts = 0
-    max_attempts = MAX_JOBS_TO_CHECK
+    run = {
+        "counts": counts,
+        "applied_jobs": [],
+        "company_site_jobs": [],
+        "attempts": 0,
+        "pages_visited": 1,
+    }
     page = 1
-    pages_visited = 1
 
-    while counts["applied"] < MAX_JOBS_TO_APPLY and attempts < max_attempts:
-        job_links = get_job_links(driver)
-        remaining = [(t, h) for (t, h) in job_links if h not in attempted]
-
-        if not remaining:
-            if pages_visited >= MAX_PAGES:
-                print(f"\nReached MAX_PAGES ({MAX_PAGES}). Stopping.")
-                break
-
-            page += 1
-            pages_visited += 1
-            print(f"\nPage exhausted — moving to page {page}")
-
-            if not go_to_next_page(driver, page):
-                print("Could not load another page. Stopping.")
-                break
-
+    try:
+        while counts["applied"] < MAX_JOBS_TO_APPLY and run["attempts"] < MAX_JOBS_TO_CHECK:
             job_links = get_job_links(driver)
             remaining = [(t, h) for (t, h) in job_links if h not in attempted]
 
             if not remaining:
-                print("New page had no unseen jobs. Stopping.")
-                break
+                if run["pages_visited"] >= MAX_PAGES:
+                    print(f"\nReached MAX_PAGES ({MAX_PAGES}). Stopping.")
+                    break
 
-        title, href = remaining[0]
-        attempted.add(href)
-        attempts += 1
+                page += 1
+                run["pages_visited"] += 1
+                print(f"\nPage exhausted — moving to page {page}")
 
-        print(f"\n[{attempts}] (page {page}) Opening: {title}")
-        print(f"  Job URL: {href}")
-        result = apply_to_single_job(driver, title, href)
-        counts[result] += 1
+                if not go_to_next_page(driver, page):
+                    print("Could not load another page. Stopping.")
+                    break
 
-        time.sleep(2)
+                job_links = get_job_links(driver)
+                remaining = [(t, h) for (t, h) in job_links if h not in attempted]
 
-    print("\n===== SUMMARY =====")
-    print(f"Applied:                {counts['applied']}")
-    print(f"Skipped (company site): {counts['skipped_company_site']}")
-    print(f"Skipped (low score):    {counts['skipped_low_score']}")
-    print(f"Skipped (excluded co.): {counts['skipped_excluded_company']}")
-    print(f"Skipped (already appl): {counts['skipped_already_applied']}")
-    print(f"Skipped (questions):    {counts['skipped_questions']}")
-    print(f"Failed:                 {counts['failed']}")
-    print(f"Total attempts:         {attempts}")
-    print(f"Pages visited:          {pages_visited}")
+                if not remaining:
+                    print("New page had no unseen jobs. Stopping.")
+                    break
+
+            title, href = remaining[0]
+            attempted.add(href)
+            run["attempts"] += 1
+
+            print(f"\n[{run['attempts']}] (page {page}) Opening: {title}")
+            print(f"  Job URL: {href}")
+            result = apply_to_single_job(driver, run, title, href)
+            counts[result] += 1
+
+            time.sleep(2)
+
+    finally:
+        print("\n===== SUMMARY =====")
+        print(f"Applied:                {counts['applied']}")
+        print(f"Skipped (company site): {counts['skipped_company_site']}")
+        print(f"Skipped (low score):    {counts['skipped_low_score']}")
+        print(f"Skipped (excluded co.): {counts['skipped_excluded_company']}")
+        print(f"Skipped (already appl): {counts['skipped_already_applied']}")
+        print(f"Skipped (questions):    {counts['skipped_questions']}")
+        print(f"Failed:                 {counts['failed']}")
+        print(f"Total attempts:         {run['attempts']}")
+        print(f"Pages visited:          {run['pages_visited']}")
+        email_run_report(run)
+
+    return run
+
+
+def email_run_report(run):
+    if not SEND_REPORT_EMAIL or run["attempts"] == 0:
+        return
+    try:
+        send_job_report(
+            run["counts"],
+            run["applied_jobs"],
+            run["company_site_jobs"],
+            run["attempts"],
+            run["pages_visited"],
+            company_site_csv=COMPANY_SITE_JOBS_FILE,
+            applied_csv=APPLIED_JOBS_FILE,
+        )
+    except Exception:
+        print("Could not send report email:")
+        traceback.print_exc()
+
+ 
 
 
 # =========================================================

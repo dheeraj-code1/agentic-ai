@@ -81,5 +81,30 @@ def main():
     print("========== END RESPONSE ==========")
 
 
+def test_email_report():
+    import csv
+    from bot import main as bot
+
+    company_site_csv = Path(__file__).parent / "bot" / bot.COMPANY_SITE_JOBS_FILE
+    with open(company_site_csv, newline="", encoding="utf-8") as f:
+        company_site_jobs = list(csv.DictReader(f))
+
+    bot.SEND_REPORT_EMAIL = True
+    bot.COMPANY_SITE_JOBS_FILE = str(company_site_csv)
+    bot.APPLIED_JOBS_FILE = str(Path(__file__).parent / "bot" / bot.APPLIED_JOBS_FILE)
+
+    run = {
+        "counts": {"applied": 0, "skipped_company_site": len(company_site_jobs)},
+        "applied_jobs": [],
+        "company_site_jobs": company_site_jobs,
+        "attempts": len(company_site_jobs),
+        "pages_visited": 1,
+    }
+    bot.email_run_report(run)
+
+
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["email"]:
+        test_email_report()
+    else:
+        main()

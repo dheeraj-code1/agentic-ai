@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 *.csv
+
+# Naukri login session
+naukri_cookies.json

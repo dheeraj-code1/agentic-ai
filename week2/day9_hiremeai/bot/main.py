@@ -1,3 +1,4 @@
+import argparse
 import re
 import time
 import os
@@ -40,17 +41,17 @@ PASSWORD = os.environ["NAUKRI_PASSWORD"]
 COOKIE_FILE = "naukri_cookies.json"
 
 MAX_JOBS_TO_APPLY = 10
-MAX_JOBS_TO_CHECK = 15   # total jobs to open across all pages, applied or skipped
-MAX_SCROLLS_TO_LOAD_JOBS = 10
-MAX_PAGES = 3       # how many result pages to walk through before giving up
+MAX_JOBS_TO_CHECK = 60   # total jobs to open across all pages, applied or skipped
+MAX_SCROLLS_TO_LOAD_JOBS = 20
+MAX_PAGES = 10       # how many result pages to walk through before giving up
 SEARCH_KEYWORD = "data engineer"
-FRESHNESS_DAYS = 7    # Naukri's "jobAge" filter: 1, 3, 7, 15, 30
+FRESHNESS_DAYS = 1    # Naukri's "jobAge" filter: 1, 3, 7, 15, 30
 EXPERIENCE_YEARS = 2    # Naukri's "experience" filter, in years (0-30)
 
 CHAT_API_URL = os.getenv("CHAT_API_URL", "http://127.0.0.1:8000/chat_naukari")
 SCORE_API_URL = os.getenv("SCORE_API_URL", "http://127.0.0.1:8000/score")
 MAX_FORM_QUESTIONS = 15
-AFTER_ANSWER_WAIT_SECONDS = 45  # wait for next question, always under 1 minute
+AFTER_ANSWER_WAIT_SECONDS = 4  # wait for next question, always under 1 minute
 
 SCORE_FILTER_ENABLED = True # Turn this on to score resume vs JD and apply only when score >= MIN_MATCH_SCORE.
 MIN_MATCH_SCORE = 55 # Minimum score to apply to a job
@@ -1708,7 +1709,54 @@ def email_run_report(run):
 # =========================================================
 # Main
 # =========================================================
+def parse_args():
+    parser = argparse.ArgumentParser(description="Naukri auto-apply bot")
+    parser.add_argument(
+        "--max-apply", type=int, default=MAX_JOBS_TO_APPLY,
+        help=f"stop after applying to this many jobs (default: {MAX_JOBS_TO_APPLY})",
+    )
+    parser.add_argument(
+        "--min-score", type=int, default=MIN_MATCH_SCORE,
+        help=f"apply only if JD match score >= this, 0-100 (default: {MIN_MATCH_SCORE})",
+    )
+    parser.add_argument(
+        "--freshness", type=int, choices=[1, 3, 7, 15, 30], default=FRESHNESS_DAYS,
+        help=f"only jobs posted in the last N days (default: {FRESHNESS_DAYS})",
+    )
+    parser.add_argument(
+        "--keyword", default=SEARCH_KEYWORD,
+        help=f'job search text, quote it if it has spaces (default: "{SEARCH_KEYWORD}")',
+    )
+    parser.add_argument(
+        "--experience", type=int, default=EXPERIENCE_YEARS,
+        help=f"your experience in years for Naukri's filter, 0-30 (default: {EXPERIENCE_YEARS})",
+    )
+    args = parser.parse_args()
+    args.keyword = " ".join(args.keyword.split())
+    if not args.keyword:
+        parser.error("--keyword must not be empty")
+    if not EXPERIENCE_MIN_YEARS <= args.experience <= EXPERIENCE_MAX_YEARS:
+        parser.error(f"--experience must be between {EXPERIENCE_MIN_YEARS} and {EXPERIENCE_MAX_YEARS}")
+    if args.max_apply < 1:
+        parser.error("--max-apply must be at least 1")
+    if not 0 <= args.min_score <= 100:
+        parser.error("--min-score must be between 0 and 100")
+    return args
+
+
 if __name__ == "__main__":
+    args = parse_args()
+    MAX_JOBS_TO_APPLY = args.max_apply
+    MIN_MATCH_SCORE = args.min_score
+    FRESHNESS_DAYS = args.freshness
+    SEARCH_KEYWORD = args.keyword
+    EXPERIENCE_YEARS = args.experience
+    print(
+        f'Keyword: "{SEARCH_KEYWORD}" | Experience: {EXPERIENCE_YEARS} yr(s) '
+        f"| Freshness: last {FRESHNESS_DAYS} day(s)\n"
+        f"Max jobs to apply: {MAX_JOBS_TO_APPLY} | Min match score: {MIN_MATCH_SCORE}"
+    )
+
     driver = create_driver()
 
     try:

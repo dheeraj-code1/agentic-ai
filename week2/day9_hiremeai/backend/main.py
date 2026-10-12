@@ -249,8 +249,7 @@ def score_resume(request: ScoreRequest):
     with open(file_path, "r") as f:
         raw_resume_text = json.load(f)
 
-    print("\n[SCORE REQUEST]", request.title)
-    print(request.job_description[:800])
+    print(f"\n[SCORE REQUEST] {request.title} (JD {len(request.job_description)} chars)")
 
     # system_prompt = f"""
     #     You are an expert recruiter. Score how well this candidate matches the job.

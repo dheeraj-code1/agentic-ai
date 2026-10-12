@@ -60,6 +60,28 @@ Also update `personal_informations` in `backend/main.py` (salary, notice period,
 
 ## Run
 
+Run everything with one command (starts the backend, runs the bot, stops the backend when the bot finishes):
+
+```bash
+./run.sh
+```
+
+Optional flags override the defaults at the top of `bot/main.py`:
+
+```bash
+./run.sh --keyword "python developer" --experience 2 --freshness 3 --max-apply 5 --min-score 70
+```
+
+| Flag | Overrides | Meaning |
+|---|---|---|
+| `--max-apply N` | `MAX_JOBS_TO_APPLY` | Stop after applying to N jobs |
+| `--min-score N` | `MIN_MATCH_SCORE` | Apply only if the JD match score is at least N (0-100) |
+| `--freshness N` | `FRESHNESS_DAYS` | Only jobs posted in the last N days (1, 3, 7, 15 or 30) |
+| `--keyword "TEXT"` | `SEARCH_KEYWORD` | Job search text (quote it if it has spaces) |
+| `--experience N` | `EXPERIENCE_YEARS` | Your experience in years for Naukri's filter (0-30) |
+
+Or start them separately:
+
 Start the backend (from `backend/`, since it reads `profile.json` from the current folder):
 
 ```bash

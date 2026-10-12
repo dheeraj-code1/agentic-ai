@@ -70,6 +70,13 @@ COUNT_LABELS = {
 }
 
 
+def _score_value(job):
+    try:
+        return int(job.get("score"))
+    except (TypeError, ValueError):
+        return -1
+
+
 def _jobs_table(jobs):
     if not jobs:
         return "<p>None</p>"
@@ -109,9 +116,9 @@ def send_job_report(counts, applied_jobs, company_site_jobs, attempts, pages_vis
 {count_rows}
 </table>
 <h3>Applied this run ({len(applied_jobs)})</h3>
-{_jobs_table(applied_jobs)}
+{_jobs_table(sorted(applied_jobs, key=_score_value, reverse=True))}
 <h3>Company-site jobs this run ({len(company_site_jobs)})</h3>
-{_jobs_table(company_site_jobs)}
+{_jobs_table(sorted(company_site_jobs, key=_score_value, reverse=True))}
 <p>All saved company-site jobs: {total_company_site} (see attached CSV).</p>
 """
     attachments = [p for p in (company_site_csv, applied_csv) if p and Path(p).exists()]

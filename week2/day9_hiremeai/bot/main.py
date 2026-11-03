@@ -33,6 +33,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.mailer import send_job_report
 HEADLESS_MODE = False
+BROWSER_SCALE = 0.80  # Chrome launch scale; window stays maximized
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -41,7 +42,7 @@ PASSWORD = os.environ["NAUKRI_PASSWORD"]
 COOKIE_FILE = "naukri_cookies.json"
 
 MAX_JOBS_TO_APPLY = 10
-MAX_JOBS_TO_CHECK = 60   # total jobs to open across all pages, applied or skipped
+MAX_JOBS_TO_CHECK = 200   # total jobs to open across all pages, applied or skipped
 MAX_SCROLLS_TO_LOAD_JOBS = 20
 MAX_PAGES = 10       # how many result pages to walk through before giving up
 SEARCH_KEYWORD = "data engineer"
@@ -52,6 +53,8 @@ CHAT_API_URL = os.getenv("CHAT_API_URL", "http://127.0.0.1:8000/chat_naukari")
 SCORE_API_URL = os.getenv("SCORE_API_URL", "http://127.0.0.1:8000/score")
 MAX_FORM_QUESTIONS = 15
 AFTER_ANSWER_WAIT_SECONDS = 4  # wait for next question, always under 1 minute
+FINALIZE_WAIT_SECONDS = 20  # after thank-you: wait for final Save / popup close / Applied
+POST_APPLY_WAIT_SECONDS = 15  # poll for screening chat OR Applied after clicking Apply
 
 SCORE_FILTER_ENABLED = True # Turn this on to score resume vs JD and apply only when score >= MIN_MATCH_SCORE.
 MIN_MATCH_SCORE = 55 # Minimum score to apply to a job
@@ -69,6 +72,10 @@ LOCATIONS = {
     "gurugram":      ["gurugram", "gurgaon", "gurugram/gurgaon", "gurgaon/gurugram"],
 }
 
+# Temporary test list. If non-empty, get_job_links() returns these instead of
+# scraping the search page. Clear this list to restore normal search.
+TEST_JOB_URLS = []
+
 
 # =========================================================
 # Driver setup
@@ -76,12 +83,12 @@ LOCATIONS = {
 def create_driver():
     options = Options()
     options.add_argument("--start-maximized")
+    options.add_argument(f"--force-device-scale-factor={BROWSER_SCALE}")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    driver = webdriver.Chrome(
+    return webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
         options=options,
     )
-    return driver
 
 
 # =========================================================
@@ -708,6 +715,10 @@ def go_to_next_page(driver, next_page):
 
 
 def get_job_links(driver):
+    if TEST_JOB_URLS:
+        print(f"  Using TEST_JOB_URLS ({len(TEST_JOB_URLS)} job(s)) — search scrape skipped")
+        return list(TEST_JOB_URLS)
+
     elements = driver.find_elements(By.XPATH, "//a[contains(@class,'title')]")
     results = []
     for el in elements:
@@ -726,6 +737,15 @@ def get_job_links(driver):
 # =========================================================
 def classify_missing_apply_button(driver):
     """When there is no #apply-button, read the header buttons to see why."""
+    try:
+        for el in driver.find_elements(
+            By.CSS_SELECTOR, "#already-applied, .already-applied, [class*='already-applied']"
+        ):
+            if el.is_displayed() and "applied" in (el.text or "").lower():
+                print("  Header buttons: ['Applied']")
+                return "skipped_already_applied"
+    except Exception:
+        pass
     try:
         buttons = driver.find_elements(By.CSS_SELECTOR, "#job_header button")
     except Exception:
@@ -774,38 +794,128 @@ CHAT_CONTAINER_SELECTORS = [
 ]
 
 
+FIND_CHAT_CONTAINER_JS = r"""
+const selectors = arguments[0];
+function hasBox(el) {
+  if (!el) return false;
+  const s = window.getComputedStyle(el);
+  if (s.display === 'none') return false;
+  const r = el.getBoundingClientRect();
+  // Off-screen drawers still have a box; do not require visibility/opacity.
+  return r.width > 40 && r.height > 40;
+}
+function pinOnScreen(drawer) {
+  if (!drawer) return;
+  // Naukri parks .chatbot_right at the viewport edge with translateX(+width).
+  // Inline transform:none loses to that stylesheet; !important is required.
+  drawer.style.setProperty('transform', 'none', 'important');
+  drawer.style.setProperty('translate', 'none', 'important');
+  drawer.style.setProperty('right', '0px', 'important');
+  drawer.style.setProperty('left', 'auto', 'important');
+  drawer.style.setProperty('visibility', 'visible', 'important');
+  drawer.style.setProperty('opacity', '1', 'important');
+  const r = drawer.getBoundingClientRect();
+  if (r.x >= window.innerWidth - 8 || r.x + r.width <= 8) {
+    const w = r.width || 472;
+    drawer.style.setProperty('left', Math.max(0, window.innerWidth - w) + 'px', 'important');
+    drawer.style.setProperty('right', 'auto', 'important');
+    drawer.style.setProperty('transform', 'none', 'important');
+  }
+}
+for (const sel of selectors) {
+  for (const el of document.querySelectorAll(sel)) {
+    if (!hasBox(el)) continue;
+    const drawer = el.closest('.chatbot_Drawer')
+      || el.closest('[class*="chatbot_Drawer"]')
+      || el;
+    pinOnScreen(drawer);
+    return el;
+  }
+}
+return null;
+"""
+
+VISIBLE_ELEMENTS_JS = r"""
+const root = arguments[0] || document;
+const sel = arguments[1];
+function isVis(el) {
+  if (!el) return false;
+  const s = window.getComputedStyle(el);
+  if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+}
+return [...root.querySelectorAll(sel)].filter(isVis);
+"""
+
+
 def find_chat_container(driver):
+    """Find the screening drawer even when Naukri parks it off-screen."""
+    try:
+        el = driver.execute_script(FIND_CHAT_CONTAINER_JS, CHAT_CONTAINER_SELECTORS)
+        if el is not None:
+            return el
+    except Exception:
+        pass
     for selector in CHAT_CONTAINER_SELECTORS:
         try:
             for el in driver.find_elements(By.CSS_SELECTOR, selector):
-                if el.is_displayed():
-                    return el
+                try:
+                    size = el.size or {}
+                    if (size.get("width") or 0) > 0 and (size.get("height") or 0) > 0:
+                        return el
+                except StaleElementReferenceException:
+                    continue
         except StaleElementReferenceException:
             continue
     return None
 
 
-def detect_screening_questions_popup(driver, wait_seconds=4):
-    """Detect a post-apply chatbot/drawer that asks screening questions."""
-    time.sleep(wait_seconds)
-    container = find_chat_container(driver)
-    if container is None:
-        return False
-
+def apply_still_clickable(driver):
+    """True if a visible Naukri Apply button is still available."""
     try:
-        controls = container.find_elements(
-            By.CSS_SELECTOR,
-            "input, textarea, select, [contenteditable='true'], [class*='radio'], [class*='chip']",
-        )
-        for el in controls:
-            if el.is_displayed():
-                print("  Detected screening questions in chatbot")
+        for btn in driver.find_elements(By.CSS_SELECTOR, "button#apply-button"):
+            if not btn.is_displayed() or not btn.is_enabled():
+                continue
+            text = (btn.text or "").strip().lower()
+            if "company site" in text:
+                continue
+            if text == "apply" or text.startswith("apply"):
                 return True
-    except StaleElementReferenceException:
-        return True
+    except Exception:
+        pass
+    return False
 
-    print("  Detected screening chatbot drawer")
-    return True
+
+def detect_screening_questions_popup(driver, wait_seconds=POST_APPLY_WAIT_SECONDS):
+    """
+    Poll after Apply for a screening chatbot/drawer.
+    Returns True as soon as a chat container is visible (does not sleep the full
+    wait if the drawer appears earlier).
+    """
+    end = time.time() + wait_seconds
+    while time.time() < end:
+        if application_looks_complete(driver):
+            return False
+        container = find_chat_container(driver)
+        if container is not None:
+            try:
+                controls = container.find_elements(
+                    By.CSS_SELECTOR,
+                    "input, textarea, select, [contenteditable='true'], "
+                    "[class*='radio'], [class*='chip']",
+                )
+                for el in controls:
+                    if el.is_displayed():
+                        print("  Detected screening questions in chatbot")
+                        return True
+            except StaleElementReferenceException:
+                print("  Detected screening chatbot drawer")
+                return True
+            print("  Detected screening chatbot drawer")
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def close_any_open_popup(driver):
@@ -852,10 +962,11 @@ function vis(el) {
   return s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) > 0;
 }
 const botMsgs = [...container.querySelectorAll('.botMsg.msg, .botMsg, li.botItem')];
+const greetingRe = /kindly answer all the recruiter's questions|thank you for showing interest/i;
 let question = '';
 for (let i = botMsgs.length - 1; i >= 0; i--) {
   const t = (botMsgs[i].innerText || '').replace(/\s+/g, ' ').trim();
-  if (t) { question = t; break; }
+  if (t && !greetingRe.test(t)) { question = t; break; }
 }
 const skip = /^(save|send|skip|close|cancel|submit|apply|next|done|type message here)$/i;
 const options = [];
@@ -890,8 +1001,12 @@ const textInput = container.querySelector(
   'div.textArea[contenteditable="true"], [contenteditable="true"], textarea, input[type="text"]'
 );
 const hasText = !!(textInput && vis(textInput));
+const dobDay = container.querySelector('input.dob__input.day, input.dob__input[name="day"]');
 let type = 'unknown';
-if (options.length) type = 'choice';
+if (dobDay) {
+  type = 'dob';
+  if (!question) question = 'Date of Birth';
+} else if (options.length) type = 'choice';
 else if (hasText) type = 'type';
 return {type, question, options, hasText};
 """
@@ -976,10 +1091,18 @@ def ask_form_api(question):
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
             answer = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = _http_error_body(exc)
+        if _is_groq_rate_limit(exc.code, body):
+            raise GroqRateLimitExceeded(body or str(exc)) from exc
+        print(f"  Form API HTTP {exc.code} at {CHAT_API_URL}: {body or exc}")
+        return ""
     except urllib.error.URLError as exc:
         print(f"  Form API is not reachable at {CHAT_API_URL}: {exc}")
         print("  Start it with: uv run uvicorn main:app --reload --port 8000")
         return ""
+    except GroqRateLimitExceeded:
+        raise
     except Exception:
         print("  Form API request failed")
         traceback.print_exc()
@@ -992,6 +1115,12 @@ def ask_form_api(question):
 
 
 def _visible_elements(container, selector):
+    try:
+        els = container.parent.execute_script(VISIBLE_ELEMENTS_JS, container, selector)
+        if els:
+            return els
+    except Exception:
+        pass
     found = []
     try:
         for el in container.find_elements(By.CSS_SELECTOR, selector):
@@ -1160,15 +1289,72 @@ def click_save_button(driver, container=None, force=False):
 
 
 def application_looks_complete(driver):
+    """True only when Naukri confirms the application went through."""
+    try:
+        for el in driver.find_elements(
+            By.CSS_SELECTOR, "#already-applied, .already-applied, [class*='already-applied']"
+        ):
+            if el.is_displayed() and "applied" in (el.text or "").lower():
+                return True
+    except Exception:
+        pass
     try:
         page = (driver.page_source or "").lower()
         if "applied successfully" in page or "application sent" in page:
             return True
+        if "you have successfully applied" in page:
+            return True
+        if "applied to '" in page or 'applied to "' in page:
+            return True
         for btn in driver.find_elements(By.CSS_SELECTOR, "button#apply-button"):
-            if "applied" in (btn.text or "").lower():
+            if btn.is_displayed() and "applied" in (btn.text or "").lower():
                 return True
     except Exception:
         return False
+    return False
+
+
+def apply_confirmed(driver):
+    """Success if Applied marker shows, or Apply is no longer clickable."""
+    if application_looks_complete(driver):
+        return True
+    return not apply_still_clickable(driver)
+
+
+def finalize_after_thank_you(driver):
+    """
+    After Naukri says thank-you, do not stop yet.
+    Click final Save if present, then wait until popup closes or Applied shows.
+    Returns True / False, or "continue" if another question appeared.
+    """
+    print("  Thank-you seen — finalizing (Save and/or wait for popup to close)")
+    container = find_chat_container(driver)
+    if container is not None:
+        if click_save_button(driver, container, force=True):
+            print("  Clicked final Save after thank-you")
+        else:
+            print("  No final Save clickable after thank-you")
+
+    end = time.time() + FINALIZE_WAIT_SECONDS
+    while time.time() < end:
+        if application_looks_complete(driver):
+            print("  Applied confirmed — success")
+            return True
+        container = find_chat_container(driver)
+        if container is None:
+            if apply_confirmed(driver):
+                print("  Popup closed and Apply no longer available — success")
+                return True
+            print("  Popup closed but Apply still clickable — failure")
+            return False
+        info = inspect_current_question(driver, container)
+        q = info.get("question") or ""
+        if q and not is_completion_message(q) and info.get("type") in ("choice", "type", "dob"):
+            print("  New question appeared after thank-you — continue filling")
+            return "continue"
+        time.sleep(0.5)
+
+    print("  Finalize timeout — popup still open and not Applied")
     return False
 
 
@@ -1195,6 +1381,35 @@ def apply_typed_answer(driver, container, answer):
         print("  Saved typed response (forced)")
         return True
     print("  Could not click Save after typing")
+    return False
+
+
+def apply_dob_answer(driver, container, answer):
+    digits = re.findall(r"\d+", answer or "")
+    if len(digits) < 3:
+        print(f"  Could not parse DOB from: {answer!r}")
+        return False
+    day, month, year = digits[0].zfill(2), digits[1].zfill(2), digits[2]
+    fields = (
+        ("day", day, "input.dob__input.day, input[name='day']"),
+        ("month", month, "input.dob__input.month, input[name='month']"),
+        ("year", year, "input.dob__input.year, input[name='year']"),
+    )
+    for name, value, selector in fields:
+        el = None
+        for found in container.find_elements(By.CSS_SELECTOR, selector):
+            el = found
+            break
+        if el is None:
+            print(f"  DOB {name} field not found")
+            return False
+        type_into_field(driver, el, value)
+    print(f"  Typed DOB: {day}/{month}/{year}")
+    time.sleep(0.4)
+    if click_save_button(driver, container, force=True):
+        print("  Saved DOB")
+        return True
+    print("  Could not click Save after DOB")
     return False
 
 
@@ -1243,6 +1458,10 @@ def wait_for_next_question(driver, previous_question, timeout=AFTER_ANSWER_WAIT_
 
 
 def fill_screening_form(driver, max_questions=MAX_FORM_QUESTIONS):
+    """
+    Answer screening questions until final Save lands or the popup closes.
+    Does not treat a thank-you message alone as success.
+    """
     answered = 0
     last_question = None
     stagnant = 0
@@ -1255,9 +1474,12 @@ def fill_screening_form(driver, max_questions=MAX_FORM_QUESTIONS):
 
         container = find_chat_container(driver)
         if container is None:
-            if answered > 0:
-                print("  Chat closed after answering — treating as success")
+            if answered > 0 and apply_confirmed(driver):
+                print("  Chat closed after answering — success")
                 return True
+            if answered > 0 and apply_still_clickable(driver):
+                print("  Chat closed but Apply still enabled — failure")
+                return False
             print("  Screening chat disappeared before a question was answered")
             return False
 
@@ -1267,14 +1489,29 @@ def fill_screening_form(driver, max_questions=MAX_FORM_QUESTIONS):
         options = info["options"]
 
         if is_completion_message(question):
-            print("  Form completed")
-            return True
+            result = finalize_after_thank_you(driver)
+            if result == "continue":
+                last_question = None
+                stagnant = 0
+                continue
+            return bool(result)
+
+        if not question:
+            print("  Waiting for the first screening question")
+            last_question = question
+            time.sleep(1)
+            continue
 
         if question == last_question:
             stagnant += 1
             if stagnant >= 2:
-                print("  Same question still showing — stopping")
-                return answered > 0
+                print("  Same question still showing — trying finalize")
+                result = finalize_after_thank_you(driver)
+                if result == "continue":
+                    last_question = None
+                    stagnant = 0
+                    continue
+                return bool(result)
         else:
             stagnant = 0
         last_question = question
@@ -1290,8 +1527,10 @@ def fill_screening_form(driver, max_questions=MAX_FORM_QUESTIONS):
                     f"Options HTML:\n{options_html}"
                 )
                 answer = ask_form_api(payload)
-                if not answer or is_completion_message(answer):
-                    return is_completion_message(answer) or False
+                if not answer:
+                    return False
+                if is_completion_message(answer):
+                    return finalize_after_thank_you(driver) is True
                 if not apply_choice_answer(driver, container, answer, options):
                     return False
                 time.sleep(0.4)
@@ -1305,14 +1544,35 @@ def fill_screening_form(driver, max_questions=MAX_FORM_QUESTIONS):
                     f"Question: {question}"
                 )
                 answer = ask_form_api(payload)
-                if not answer or is_completion_message(answer):
-                    return is_completion_message(answer) or False
+                if not answer:
+                    return False
+                if is_completion_message(answer):
+                    return finalize_after_thank_you(driver) is True
                 container = find_chat_container(driver)
                 if container is None or not apply_typed_answer(driver, container, answer):
                     return False
+            elif q_type == "dob":
+                payload = (
+                    "TYPING QUESTION. Return date of birth as DD MM YYYY only. "
+                    "No HTML, no extra words.\n\n"
+                    f"Question: {question or 'Date of Birth'}"
+                )
+                answer = ask_form_api(payload)
+                if not answer:
+                    return False
+                container = find_chat_container(driver)
+                if container is None or not apply_dob_answer(driver, container, answer):
+                    return False
             else:
+                if not question:
+                    print("  Chat open but question still loading — waiting")
+                    time.sleep(1)
+                    continue
                 print("  Could not tell if this is a typing or select question")
-                return answered > 0
+                result = finalize_after_thank_you(driver)
+                if result == "continue":
+                    continue
+                return bool(result) if answered > 0 else False
         except StaleElementReferenceException:
             print("  Chat UI refreshed while answering — retrying")
             time.sleep(1)
@@ -1321,15 +1581,24 @@ def fill_screening_form(driver, max_questions=MAX_FORM_QUESTIONS):
         answered += 1
         status = wait_for_next_question(driver, question, timeout=AFTER_ANSWER_WAIT_SECONDS)
         if status == "done":
-            print("  Form completed")
-            return True
+            result = finalize_after_thank_you(driver)
+            if result == "continue":
+                last_question = None
+                stagnant = 0
+                continue
+            return bool(result)
         if status == "closed":
-            print("  Chat closed after answering — treating as success")
-            return True
+            if apply_confirmed(driver):
+                print("  Chat closed after answering — success")
+                return True
+            print("  Chat closed but Apply still enabled — failure")
+            return False
         if status == "timeout":
             print(f"  Next question did not appear within {AFTER_ANSWER_WAIT_SECONDS}s")
 
-    return answered > 0
+    print("  Question loop ended — finalizing")
+    result = finalize_after_thank_you(driver)
+    return result is True
 
 
 # =========================================================
@@ -1362,6 +1631,29 @@ def is_company_excluded(company):
 # =========================================================
 # Resume vs JD score
 # =========================================================
+class GroqRateLimitExceeded(Exception):
+    """Raised when Groq's daily token limit is hit; the run should stop and email."""
+
+
+def _http_error_body(exc):
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _is_groq_rate_limit(status_code, body):
+    if status_code == 429:
+        return True
+    text = (body or "").lower()
+    return (
+        "rate_limit" in text
+        or "rate limit" in text
+        or "tokens per day" in text
+        or "tpd" in text
+    )
+
+
 def get_job_description(driver):
     # The hash suffix in Naukri's class names changes between deploys.
     for selector in ("section.styles_job-desc-container__txpYf", "section[class*='job-desc-container']"):
@@ -1409,9 +1701,17 @@ def score_resume_against_jd(title, job_description):
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
             data = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        body = _http_error_body(exc)
+        if _is_groq_rate_limit(exc.code, body):
+            raise GroqRateLimitExceeded(body or str(exc)) from exc
+        print(f"  Score API HTTP {exc.code} at {SCORE_API_URL}: {body or exc}")
+        return {"score": 0, "verdict": "score api unavailable", "reason": ""}
     except urllib.error.URLError as exc:
         print(f"  Score API is not reachable at {SCORE_API_URL}: {exc}")
         return {"score": 0, "verdict": "score api unavailable", "reason": ""}
+    except GroqRateLimitExceeded:
+        raise
     except Exception:
         print("  Score API request failed")
         traceback.print_exc()
@@ -1574,9 +1874,10 @@ def apply_to_single_job(driver, run, title, href, wait_timeout=20):
             print(f"  No clickable Apply button. Screenshot: {screenshot_path}")
             return "failed"
 
+        # Poll for screening chat OR Applied confirmation (do not assume click = applied)
         if detect_screening_questions_popup(driver):
             print("  Screening questions detected — filling via API")
-            if fill_screening_form(driver):
+            if fill_screening_form(driver) and apply_confirmed(driver):
                 print("  Applied (form filled):", title)
                 save_applied_job(run, title, company, href, score_result)
                 print("  Waiting 3 seconds after apply")
@@ -1586,11 +1887,22 @@ def apply_to_single_job(driver, run, title, href, wait_timeout=20):
             close_any_open_popup(driver)
             return "failed"
 
-        print("  Applied:", title)
-        save_applied_job(run, title, company, href, score_result)
-        print("  Waiting 3 seconds after apply")
-        time.sleep(3)
-        return "applied"
+        if application_looks_complete(driver) or apply_confirmed(driver):
+            print("  Applied:", title)
+            save_applied_job(run, title, company, href, score_result)
+            print("  Waiting 3 seconds after apply")
+            time.sleep(3)
+            return "applied"
+
+        print("  Apply click did not confirm — Apply still enabled or no Applied marker")
+        safe_name = "".join(c if c.isalnum() else "_" for c in title)[:50]
+        screenshot_path = f"debug_not_applied_{safe_name}.png"
+        driver.save_screenshot(screenshot_path)
+        print(f"  Screenshot: {screenshot_path}")
+        return "failed"
+
+    except GroqRateLimitExceeded:
+        raise
 
     except TimeoutException:
         print("  Timed out waiting for job page to load:", title)
@@ -1669,6 +1981,11 @@ def apply_jobs(driver):
             counts[result] += 1
 
             time.sleep(2)
+
+    except GroqRateLimitExceeded as exc:
+        print("\n===== GROQ RATE LIMIT =====")
+        print("Daily token limit hit — stopping the run and sending the report email.")
+        print(f"Detail: {exc}")
 
     finally:
         print("\n===== SUMMARY =====")

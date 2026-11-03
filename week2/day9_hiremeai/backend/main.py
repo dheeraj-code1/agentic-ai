@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse
 import os 
 from pathlib import Path
 from dotenv import load_dotenv
-from groq import Groq, APIConnectionError, APITimeoutError
+from groq import Groq, APIConnectionError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, ConfigDict
 from typing import Literal
 import json
@@ -58,7 +58,7 @@ Degree: B.Tech in Electrical Engineering, Specialization: Computer Science, 8.8 
 Institute: DayalBagh Educational Institute, Agra
 
 Current Location: Noida
-Preferred Location: Mumbai, Pune, Bangalore, Delhi, Gurgaon, Noida, any location in India
+Preferred Location: Noida, Gurgaon, Delhi,  Mumbai, Pune, Bangalore, any location in India
 Work Mode: Open to onsite, hybrid and remote
 Willing to travel: Yes
 Willing to relocate: Yes
@@ -83,6 +83,12 @@ Agentic AI experience: Near about 1 year
 Snowflake experience: 0
 Snowflake Admin experience: 0
 Semantic search / information retrieval / RAG: Near about 1 year
+
+Total years of education: 16 (Class 1-12 + 4-year B.Tech, 2021-2025)
+class 10 passout year: 2019, 95.5%
+class 12 passout year: 2021, 96.5%
+B.Tech passout year: 2025, 8.8 CGPA
+
 
 Soft Skills:
 Good communication skills
@@ -302,11 +308,19 @@ def score_resume(request: ScoreRequest):
         - Role/domain fit: 10
 
         ## Rules
-        - Count a skill only if it appears in the resume. Treat equivalent names as the same
-        (JS = JavaScript, Postgres = PostgreSQL). Give partial credit for closely related tools.
-        - Calculate experience from resume date ranges; count only relevant experience.
+        - For education years, total experience, notice period, location, CTC, and similar
+        profile facts, PERSONAL INFORMATION is the source of truth. Do not ignore it.
+        The candidate has 16 years of education (Class 1-12 + 4-year B.Tech). That meets
+        any JD "15 years education" / "years of education" field. Never score that as a gap.
+        - Naukri JDs often list "15 years education" as a template. Treat it as satisfied.
+        - Count a skill only if it appears in the resume or personal information. Treat
+        equivalent names as the same (JS = JavaScript, Postgres = PostgreSQL). Give partial
+        credit for closely related tools.
+        - Use total experience from PERSONAL INFORMATION when stated; otherwise calculate
+        from resume date ranges. Count only relevant experience.
         - If a must-have requirement is missing (core skill, minimum experience, location or
-        notice period conflict), cap the score at 60.
+        notice period conflict), cap the score at 60. Do not treat education-years template
+        fields as a must-have gap.
         - Verdict bands: 85-100 strong match, 75-84 good match, 50-74 partial match, 0-49 weak match.
         - 75+ means the candidate should apply.
 
@@ -349,6 +363,12 @@ def score_resume(request: ScoreRequest):
             result = _parse_score_payload(response.choices[0].message.content)
             print("[SCORE RESPONSE]", result)
             return result
+        except RateLimitError as e:
+            print(f"[SCORE] Groq rate limit exceeded: {e}")
+            raise HTTPException(
+                status_code=429,
+                detail="groq rate limit exceeded; stop applying until tokens reset",
+            ) from e
         except (APIConnectionError, APITimeoutError) as e:
             last_error = e
             print(f"[SCORE RETRY] attempt {attempt}/{SCORE_MAX_ATTEMPTS} failed: {e}")

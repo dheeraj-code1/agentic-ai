@@ -12,3 +12,13 @@ wheels/
 
 # Naukri login session
 naukri_cookies.json
+
+# Parsed resume (personal details), regenerated from resume_path on first backend start
+profile*.json
+
+# Local screening / apply click experiments (not production)
+bot/test_screening_job.py
+bot/test_apply_click.py
+bot/test_find_nopopup.py
+bot/debug_*.png
+debug_*.png

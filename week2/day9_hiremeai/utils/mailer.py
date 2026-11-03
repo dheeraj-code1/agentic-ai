@@ -44,13 +44,14 @@ def send_email(subject, body, to=None, attachments=None, html=False):
     else:
         message.set_content(body)
 
-    for attachment in attachments or []:
-        path = Path(attachment)
-        mime_type, _ = mimetypes.guess_type(path.name)
-        maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
-        message.add_attachment(
-            path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name
-        )
+    # Attachments disabled — report is HTML-only.
+    # for attachment in attachments or []:
+    #     path = Path(attachment)
+    #     mime_type, _ = mimetypes.guess_type(path.name)
+    #     maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
+    #     message.add_attachment(
+    #         path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name
+    #     )
 
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context()) as server:
         server.login(SENDER_EMAIL, app_password.replace(" ", ""))
@@ -96,7 +97,7 @@ def _jobs_table(jobs):
 
 def send_job_report(counts, applied_jobs, company_site_jobs, attempts, pages_visited,
                     company_site_csv=None, applied_csv=None, to=None):
-    """Email a summary of one bot run, attaching the job CSVs that exist."""
+    """Email a summary of one bot run (HTML body only; no CSV attachments)."""
     today = datetime.now().strftime("%d %b %Y %H:%M")
     count_rows = "".join(
         f"<tr><td>{label}</td><td>{counts.get(key, 0)}</td></tr>"
@@ -119,14 +120,14 @@ def send_job_report(counts, applied_jobs, company_site_jobs, attempts, pages_vis
 {_jobs_table(sorted(applied_jobs, key=_score_value, reverse=True))}
 <h3>Company-site jobs this run ({len(company_site_jobs)})</h3>
 {_jobs_table(sorted(company_site_jobs, key=_score_value, reverse=True))}
-<p>All saved company-site jobs: {total_company_site} (see attached CSV).</p>
+<p>All saved company-site jobs: {total_company_site}.</p>
 """
-    attachments = [p for p in (company_site_csv, applied_csv) if p and Path(p).exists()]
+    # attachments = [p for p in (company_site_csv, applied_csv) if p and Path(p).exists()]
     send_email(
         f"HireMeAI: Applied {counts.get('applied', 0)} job(s) - {today}",
         body,
         to=to or REPORT_EMAIL_TO,
-        attachments=attachments,
+        # attachments=attachments,
         html=True,
     )
 

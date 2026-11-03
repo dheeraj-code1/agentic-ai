@@ -121,6 +121,8 @@ Both CSVs have the same columns (`saved_at, title, company, score, verdict, reas
 - `bot/applied_jobs.csv` – jobs the bot applied to
 - `bot/company_site_jobs.csv` – jobs that passed the score but only offer "Apply on company site", to apply manually
 
+The bot also saves your Naukri login session to `bot/naukri_cookies.json` so later runs skip the login. It is gitignored; never commit it, since anyone with it can use your account. Delete it to force a fresh login.
+
 ## Report email
 
 When `SEND_REPORT_EMAIL = True` and Gmail is set up in `backend/.env`, the bot emails a summary at the end of every run (also if it crashes mid-run): counts per result, a table of applied jobs, a table of company-site jobs, and both CSVs attached.
